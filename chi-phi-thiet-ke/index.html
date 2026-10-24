@@ -1107,15 +1107,19 @@ function tinhHangMuc(it, dg, duAn) {
     /* Trọn gói theo mức — diện tích chỉ để ghi nhận quy mô, KHÔNG nhân vào tiền. */
     const m = MUC_GIA[it && it.mucGia] ? it.mucGia : (MUC_GIA[dg.mucMacDinh] ? dg.mucMacDinh : 'giua');
     const u = (dg.noiThat.muc || {})[m] || { concept: 0, tkbvtc: 0 };
+    /* Số bộ hồ sơ: 1 mẫu điển hình = 1 bộ; mẫu biến thể = hệ số biến thể (50%).
+       Hạng mục do nút "Báo giá nội thất" sinh ra mang sẵn soBo và lời giải thích ghiNT. */
+    const soBo = +it.soBo > 0 ? +it.soBo : 1;
 
-    r.mucGia = m;
-    r.T = +u.concept || 0;
-    r.V = +u.tkbvtc || 0;
+    r.mucGia = m; r.soBo = soBo;
+    r.T = (+u.concept || 0) * soBo;
+    r.V = (+u.tkbvtc || 0) * soBo;
     r.dienGiai = [
       ['Mức đơn giá', MUC_GIA[m].ten + ' — trọn gói, không nhân diện tích, không giảm', null, 'text'],
       ['Quy mô ghi nhận', `${fmt(d)} m² sàn`, null, 'text'],
-      ['Concept (T)', 'trọn gói', r.T],
-      ['TKBVTC (V)',  'trọn gói', r.V],
+      ['Số bộ hồ sơ', it.ghiNT || 'nhập tay', soBo, '×'],
+      ['Concept (T)', `trọn gói ${fmt(u.concept)} × ${soBo} bộ`, r.T],
+      ['TKBVTC (V)',  `trọn gói ${fmt(u.tkbvtc)} × ${soBo} bộ`, r.V],
     ];
   }
 
@@ -2646,6 +2650,113 @@ function moBaoCao() {
 </script>
 <script>
 /* =============================================================================
+   noithat.js — Báo giá nội thất tự động từ các hạng mục công trình đã tích
+
+   Nội thất tính TRỌN GÓI theo mức (NOXH · chung · điểm nhấn), không nhân m².
+   Tiền = đơn giá trọn gói của mức × SỐ BỘ HỒ SƠ. Số bộ bóc như sau:
+     · Cao tầng, văn phòng, TTTM: 1 bộ cho mẫu điển hình
+                                  + hệ số biến thể (50%) nếu có tòa biến thể.
+       Tòa lặp lại dùng lại đúng bộ hồ sơ đó → không tính thêm.
+       (Cùng cách đếm với concept mẫu điển hình — heSoConcept trong calc.js.)
+     · Thấp tầng (liền kề, biệt thự): mỗi mẫu nhà 1 bộ.
+     · Công trình đặc thù khác (trường, y tế, chợ, CTCC…): 1 bộ trọn gói,
+       quy mô m² chỉ ghi nhận.
+   Hạ tầng, cảnh quan, nội thất, loại Khác: không bóc.
+   Mức giá lấy theo mức của hạng mục nguồn; chưa có thì đoán theo tên
+   (NOXH, TĐC → cận dưới · điểm nhấn → cận trên · còn lại mức giữa).
+   Hạng mục sinh ra mang nguonNT = id hạng mục nguồn, bấm lại thì thay chứ
+   không nhân đôi.
+   ========================================================================== */
+'use strict';
+
+const NT_THEO_MAU_THAP = { caoTang: 1, vanPhong: 1, tttm: 1 };
+
+/** Đề xuất một hạng mục nội thất cho hạng mục công trình it; null nếu không bóc */
+function deXuatNoiThat(it, r, dg) {
+  if (!r || r.nhom !== 'CT') return null;
+  const L = LOAI[it.loai] || {};
+  const muc = MUC_GIA[it.mucGia] ? it.mucGia : mucTheoTen(it.ten);
+  const kB = +dg.heSoBienThe || 0;
+  let soBo = 1, ghi;
+  if (NT_THEO_MAU_THAP[it.loai]) {
+    const nToa = Math.max(1, +(it.ntoa ?? 1) || 1);
+    const nBt = Math.min(Math.max(0, +it.nbt || 0), nToa);
+    const lap = Math.max(0, nToa - 1 - (nBt ? 1 : 0));
+    soBo = heSoConcept(nToa, nBt, kB);
+    ghi = `1 mẫu điển hình${nBt ? ` + 1 mẫu biến thể × ${pct(kB)}` : ''} — ${nToa} tòa, ${nBt} biến thể`
+        + (lap ? `; ${lap} tòa lặp dùng lại hồ sơ, không tính thêm` : '');
+  } else if (L.mode === 'thapTang') {
+    soBo = Math.max(1, +(it.soMau ?? 1) || 1);
+    ghi = `${soBo} mẫu nhà × 1 bộ trọn gói`;
+  } else {
+    ghi = `${L.ten || 'công trình'} — 1 bộ trọn gói${+it.d ? `, quy mô ${fmt(it.d)} m² chỉ ghi nhận` : ''}`;
+  }
+  return { ten: 'Nội thất — ' + (it.ten || ''), loai: 'noiThat', pk: it.pk, d: +it.d || 0,
+           mucGia: muc, soBo, ghiNT: ghi, nguonNT: it.id };
+}
+
+function dialogBaoGiaNoiThat(body) {
+  const d = daHienTai(), kq = kqHienTai(), dg = kho.donGia;
+  const chon = kq.rows.filter(({ it }) => tich.has(it.id));
+  const de = [], bo = [];
+  for (const { it, r } of chon) {
+    const x = deXuatNoiThat(it, r, dg);
+    if (x) de.push({ x, r: tinhHangMuc(x, dg, d), nguon: it }); else bo.push(it);
+  }
+  const idNguon = new Set(de.map((o) => o.x.nguonNT));
+  const ntKhac = d.items.filter((x) => x.loai === 'noiThat' && !(x.nguonNT && idNguon.has(x.nguonNT)));
+  const ntKhacTay = ntKhac.filter((x) => !x.nguonNT);
+  const ntLai = d.items.filter((x) => x.loai === 'noiThat' && x.nguonNT && idNguon.has(x.nguonNT)).length;
+
+  const tong = de.reduce((a, o) => ({ T: a.T + o.r.T, V: a.V + o.r.V }), { T: 0, V: 0 });
+  const hang = de.map(({ x, r, nguon }, i) => `<tr><td class="z">${i + 1}</td>
+      <td>${escHtml(nguon.ten || '')}<div class="phu">${escHtml(LOAI[nguon.loai]?.ten || '')}</div></td>
+      <td>${MUC_GIA[x.mucGia].ngan}</td><td class="n">${so3(x.soBo)}</td>
+      <td style="font-size:10.5px;color:#5a6b86">${escHtml(x.ghiNT)}</td>
+      <td class="n">${fmt(r.T)}</td><td class="n">${fmt(r.V)}</td><td class="n"><b>${fmt(r.T + r.V)}</b></td></tr>`).join('');
+
+  body.append(el(`<div class="note" style="margin-bottom:10px">Nội thất tính <b>trọn gói theo mức</b>
+    (sửa mức ở <b>Đơn giá &amp; tham số</b>): tiền = đơn giá trọn gói × <b>số bộ hồ sơ</b>.
+    Cao tầng: 1 bộ cho mẫu điển hình + ${pct(+dg.heSoBienThe || 0)} cho mẫu biến thể; tòa lặp dùng lại hồ sơ.
+    Thấp tầng: mỗi mẫu nhà 1 bộ. Công trình đặc thù: 1 bộ trọn gói.</div>`));
+  if (!de.length) {
+    body.append(el('<div class="note"><b class="bad">Không có hạng mục công trình nào trong số đã tích.</b> '
+      + 'Hạ tầng, cảnh quan, nội thất và loại Khác không bóc nội thất.</div>'));
+    return;
+  }
+  body.append(el(`<table class="mini"><thead><tr><th>#</th><th>Hạng mục công trình</th><th>Mức</th>
+    <th class="n">Số bộ</th><th>Cách bóc</th><th class="n">Concept</th><th class="n">TKBVTC</th><th class="n">Tổng</th></tr></thead>
+    <tbody>${hang}</tbody><tfoot><tr><td></td><td><b>TỔNG ${de.length} hạng mục</b></td><td></td>
+    <td class="n"><b>${so3(de.reduce((a, o) => a + o.x.soBo, 0))}</b></td><td></td>
+    <td class="n"><b>${fmt(tong.T)}</b></td><td class="n"><b>${fmt(tong.V)}</b></td>
+    <td class="n"><b>${fmt(tong.T + tong.V)}</b></td></tr></tfoot></table>`));
+  if (bo.length) body.append(el(`<div class="src">Bỏ qua ${bo.length} hạng mục không phải công trình: `
+    + `${escHtml(bo.map((x) => x.ten).join(', '))}</div>`));
+
+  const thay = chk(`Xoá ${ntKhacTay.length} hạng mục nội thất đang có trong dự án (bóc từ TMB / nhập tay) để không tính trùng`,
+    ntKhacTay.length > 0, () => {});
+  if (ntKhacTay.length) body.append(thay);
+  body.append(el(`<div class="src">${ntLai ? `${ntLai} hạng mục nội thất đã báo giá trước từ đúng các công trình này sẽ được thay bằng bản mới. ` : ''}`
+    + 'Hạng mục nội thất mới nằm ở nhóm <b>Nội thất</b>, sửa được mức và số bộ như mọi hạng mục khác.</div>'));
+
+  const nut = el(`<button class="btn g" style="margin-top:10px">Thêm ${de.length} hạng mục nội thất vào dự án</button>`);
+  nut.onclick = () => {
+    const xoaTay = ntKhacTay.length && $('input', thay).checked;
+    const truoc = d.items.length;
+    d.items = d.items.filter((x) => !(x.loai === 'noiThat'
+      && ((x.nguonNT && idNguon.has(x.nguonNT)) || (xoaTay && !x.nguonNT))));
+    const xoa = truoc - d.items.length;
+    d.items.push(...de.map(({ x }) => Object.assign({ id: moiId() }, x)));
+    tich.clear();
+    $('#dlg').close();
+    ve();
+    toast(`Đã thêm ${de.length} hạng mục nội thất — ${ty(tong.T + tong.V)}${xoa ? ` · xoá ${xoa} hạng mục nội thất cũ` : ''}`, 5000);
+  };
+  body.append(nut);
+}
+</script>
+<script>
+/* =============================================================================
    app.js — Giao diện
    Kho nhiều dự án: đơn giá dùng chung, mỗi dự án có địa điểm riêng để tra
    hệ số điều chỉnh vùng theo QĐ 409.
@@ -2670,7 +2781,7 @@ function moiId() { return 'i' + Math.random().toString(36).slice(2, 9); }
 /* Phiên bản ĐỊNH DẠNG DỮ LIỆU — tăng mỗi khi thêm loại hạng mục hoặc trường mới.
    File .json lưu kèm số này; mở ở máy chạy bản app cũ hơn thì báo rõ ra thay vì
    hỏng âm thầm (bản cũ không biết loại 'khac' sẽ vỡ form sửa hạng mục). */
-const PHIEN_BAN = 4;   // 4: mức đơn giá (NOXH / chung / điểm nhấn), cảnh quan tuyến phố, QLTK
+const PHIEN_BAN = 5;   // 5: nội thất có số bộ hồ sơ (soBo) + nút báo giá nội thất · 4: mức đơn giá, cảnh quan tuyến phố, QLTK
 
 /* Bảng giá chuyển sang "Giả định đơn giá thiết kế ngoài QĐ 425" (10/2026). Dữ liệu lưu từ trước
    được chuyển MỘT LẦN: hạng mục còn đúng concept mặc định cũ → theo mức (NOXH, TĐC cận dưới,
@@ -2905,6 +3016,7 @@ function thanhCongCu(d) {
 
   const nut = (nhan, fn, tat) => { const b = el(`<button class="btn sm">${nhan}</button>`); b.disabled = !!tat; b.onclick = fn; return b; };
   const i = () => d.items.findIndex((x) => x.id === chon);
+  const soTich = d.items.filter((x) => tich.has(x.id)).length;
   const doiCho = (v) => { const a = i(), b = a + v; if (a < 0 || b < 0 || b >= d.items.length) return;
     [d.items[a], d.items[b]] = [d.items[b], d.items[a]]; ve(); };
 
@@ -2916,11 +3028,15 @@ function thanhCongCu(d) {
       d.items.splice(a, 1); chon = null; ve(); }, !chon),
     nut('↑', () => doiCho(-1), !chon), nut('↓', () => doiCho(1), !chon),
     el('<span class="sep"></span>'),
+    nut(`Báo giá nội thất${soTich ? ` (${soTich})` : ''}`, () => moDialog('Báo giá nội thất theo hạng mục đã tích', dialogBaoGiaNoiThat), !soTich),
+    nut('Bỏ tích', () => { tich.clear(); veLeft(); }, !soTich),
+    el('<span class="sep"></span>'),
     nut('Đối chiếu file gốc', () => moDialog('Đối chiếu tra bảng với file Excel gốc', dialogDoiChieu)));
   return t;
 }
 
 let locPK = '';
+let tich = new Set();   // id các hạng mục đang tích chọn (để báo giá nội thất)
 
 /* Mở một dự án (hoặc màn TỔNG HỢP).
    Bộ lọc phân kỳ là của RIÊNG từng dự án — dự án khác có bộ phân kỳ khác, giữ
@@ -2930,6 +3046,7 @@ function moDuAn(id) {
   choDA = id;
   chon = null;
   locPK = '';
+  tich = new Set();
   ve();
 }
 
@@ -2964,20 +3081,25 @@ function bangHangMuc(kq) {
   const wrap = el('<div class="tbl-wrap"></div>');
   const t = el('<table class="grid"></table>');
 
-  const head = ['#', 'Hạng mục', 'Loại', 'PK', 'Tổng sàn (m²)', 'Tầng/Cấp', 'Tòa',
+  const head = ['<input type="checkbox" data-tich="tatca">', '#', 'Hạng mục', 'Loại', 'PK', 'Tổng sàn (m²)', 'Tầng/Cấp', 'Tòa',
     'Concept', 'TKCS', ...(kt ? ['TKKT'] : []), 'TKBVTC', 'HSBH', 'Tổng CPTK', 'ĐB'];
-  const cls = ['c', '', '', 'c', 'n', 'c', 'c', 'n', 'n', ...(kt ? ['n'] : []), 'n', 'n', 'n', 'c'];
+  const cls = ['c', 'c', '', '', 'c', 'n', 'c', 'c', 'n', 'n', ...(kt ? ['n'] : []), 'n', 'n', 'n', 'c'];
   /* Bề rộng theo %, cộng đúng 100 — bảng dùng table-layout:fixed nên phần dư
      chia đều theo tỷ lệ này thay vì dồn hết vào cột "Hạng mục". */
-  const w = kt ? [3, 14, 10, 3, 7, 6, 6, 8, 8, 8, 8, 6, 10, 3]
-               : [3, 16, 11, 3, 8, 6, 6, 9, 9, 9, 7, 10, 3];
+  const w = kt ? [2, 3, 12, 10, 3, 7, 6, 6, 8, 8, 8, 8, 6, 10, 3]
+               : [2, 3, 14, 11, 3, 8, 6, 6, 9, 9, 9, 7, 10, 3];
+  /* ô tích: chọn hạng mục để báo giá nội thất (chỉ giữ trong phiên, không lưu) */
+  const oTich = (ids) => { const n = ids.filter((x) => tich.has(x)).length;
+    return `<input type="checkbox" data-tich="${ids.join(',')}"${ids.length && n === ids.length ? ' checked' : ''}>`; };
+  head[0] = oTich(hien.map((x) => x.it.id));
 
   const p = [`<colgroup>${w.map((x) => `<col style="width:${x}%">`).join('')}</colgroup>`,
     `<thead><tr>${head.map((h, i) => `<th class="${cls[i]}">${h}</th>`).join('')}</tr></thead>`, '<tbody>'];
 
   for (const [key, ma, list] of nhomCoDuLieu(hien)) {
-    p.push(`<tr class="grp"><td class="c">${ma}</td><td colspan="${head.length - 3}">${NHOM[key].ten}
-      <span class="tag">${list.length} hạng mục</span></td>
+    const daTich = list.filter((x) => tich.has(x.it.id)).length;
+    p.push(`<tr class="grp"><td class="c">${oTich(list.map((x) => x.it.id))}</td><td class="c">${ma}</td><td colspan="${head.length - 4}">${NHOM[key].ten}
+      <span class="tag">${list.length} hạng mục</span>${daTich ? ` <span class="tag off">đã tích ${daTich}</span>` : ''}</td>
       <td class="n">${tien(list.reduce((a, x) => a + cptk(x.r), 0))}</td>
       <td class="c">${list.reduce((a, x) => a + x.r.AI, 0)}</td></tr>`);
 
@@ -2991,6 +3113,7 @@ function bangHangMuc(kq) {
         : `${it.soTang ? it.soTang + 'T' : ''}${it.soHam ? '+' + it.soHam + 'H' : ''}` +
           ` <span class="tag">${r.cap}</span>${r.buocTK === 3 ? ' <span class="tag">3b</span>' : ''}`;
       p.push(`<tr class="item${chon === it.id ? ' sel' : ''}" data-id="${it.id}">
+        <td class="c">${oTich([it.id])}</td>
         <td class="c z">${i + 1}</td>
         <td class="nm" title="Bấm để sửa">${escHtml(it.ten || '(chưa đặt tên)')}</td>
         <td><span class="tag">${LOAI[it.loai]?.ten || it.loai}</span></td>
@@ -3003,7 +3126,7 @@ function bangHangMuc(kq) {
 
   const S = (k) => hien.reduce((a, x) => a + x.r[k], 0);
   const soTat = hien.reduce((a, x) => a + x.r.soTat, 0);
-  p.push(`<tr class="tot"><td></td><td>TỔNG${locPK ? ` — phân kỳ ${locPK}` : ''}${
+  p.push(`<tr class="tot"><td></td><td></td><td>TỔNG${locPK ? ` — phân kỳ ${locPK}` : ''}${
       soTat ? ` <span class="tag off">${soTat} khoản đang tắt</span>` : ''}</td><td></td><td></td>
     <td class="n">${fmt(hien.reduce((a, x) => a + (+x.it.d || 0), 0))}</td><td></td><td></td>
     <td class="n">${tien(S('T'))}</td><td class="n">${tien(S('U'))}</td>
@@ -3018,6 +3141,14 @@ function bangHangMuc(kq) {
     e.stopPropagation();
     batTatKhoan(td.closest('tr').dataset.id, td.dataset.kh);
   }));
+  $$('input[data-tich]', t).forEach((cb) => {
+    cb.onclick = (e) => e.stopPropagation();
+    cb.onchange = () => {
+      const ids = cb.dataset.tich.split(',').filter(Boolean);
+      ids.forEach((x) => (cb.checked ? tich.add(x) : tich.delete(x)));
+      veLeft();
+    };
+  });
   if (!hien.length) wrap.append(el('<div class="rong">Chưa có hạng mục nào. Bấm <b>+ Hạng mục</b> để thêm.</div>'));
   wrap.append(t);
   return wrap;
@@ -3454,8 +3585,9 @@ function formHangMuc() {
     const mu = kho.donGia.noiThat.muc;
     x.append(fld('Mức đơn giá', 'select', r.mucGia, (v) => set('mucGia', v), null,
       Object.entries(MUC_GIA).map(([k, v]) => [k, `${v.ten} — ${ty(mu[k].concept)} / ${ty(mu[k].tkbvtc)}`])));
-    x.append(ro('Concept trọn gói', fmt(mu[r.mucGia].concept)));
-    x.append(ro('TKBVTC trọn gói', fmt(mu[r.mucGia].tkbvtc)));
+    x.append(fN('Số bộ hồ sơ', 'soBo', it.ghiNT || '1 mẫu điển hình = 1 bộ · biến thể = 0,5', 1));
+    x.append(ro('Concept trọn gói', fmt(mu[r.mucGia].concept * r.soBo)));
+    x.append(ro('TKBVTC trọn gói', fmt(mu[r.mucGia].tkbvtc * r.soBo)));
     gnt.append(el('<div class="src">Một bộ hồ sơ nội thất là <b>một mẫu điển hình dùng lại cho nhiều tòa</b> nên tiền '
       + 'không chạy theo diện tích — giống concept mẫu điển hình của cao tầng. Quy mô m² sàn chỉ để ghi nhận '
       + 'và cộng vào tổng sàn. Sửa ba mức ở <b>Đơn giá &amp; tham số</b>.</div>'));
